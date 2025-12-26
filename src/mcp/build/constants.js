@@ -4,5 +4,6 @@ export const LokkaDefaultTenantId = "common";
 export const LokkaDefaultRedirectUri = "http://localhost:3000";
 // Default Graph API version based on USE_GRAPH_BETA environment variable
 export const getDefaultGraphApiVersion = () => {
-    return process.env.USE_GRAPH_BETA !== 'false' ? "beta" : "v1.0";
+    // Default to v1.0 unless explicitly opted into beta
+    return process.env.USE_GRAPH_BETA === 'true' ? "beta" : "v1.0";
 };
