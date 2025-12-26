@@ -18,8 +18,44 @@ logger.info("Starting Lokka Multi-Microsoft API MCP Server (v0.2.0 - Token-Based
 // Initialize authentication and clients
 let authManager = null;
 let graphClient = null;
-// Check USE_GRAPH_BETA environment variable
-const useGraphBeta = process.env.USE_GRAPH_BETA !== 'false'; // Default to true unless explicitly set to 'false'
+// Security configuration
+const secureMode = process.env.SECURE_MODE !== 'false'; // Default to secure posture
+const allowMutatingRequests = process.env.ALLOW_MUTATING_REQUESTS === 'true' || (!secureMode && process.env.ALLOW_MUTATING_REQUESTS !== 'false');
+function parseAllowedPrefixes(envVar) {
+    if (!envVar) {
+        return [];
+    }
+    return envVar
+        .split(',')
+        .map(prefix => prefix.trim())
+        .filter(prefix => prefix.length > 0);
+}
+const allowedGraphPrefixes = parseAllowedPrefixes(process.env.GRAPH_ALLOWED_PREFIXES);
+const allowedAzurePrefixes = parseAllowedPrefixes(process.env.AZURE_ALLOWED_PREFIXES);
+if (secureMode) {
+    if (!allowMutatingRequests) {
+        logger.info("Secure mode: mutating requests (POST/PUT/PATCH/DELETE) are disabled unless ALLOW_MUTATING_REQUESTS=true");
+    }
+    if (allowedGraphPrefixes.length === 0) {
+        throw new Error("Secure mode requires GRAPH_ALLOWED_PREFIXES to be configured with at least one allowed path prefix");
+    }
+}
+function assertPathAllowed(apiType, path) {
+    if (!secureMode) {
+        return;
+    }
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    const prefixes = apiType === "graph" ? allowedGraphPrefixes : allowedAzurePrefixes;
+    if (prefixes.length === 0) {
+        throw new Error(`${apiType} access is not allowed because no prefixes are configured`);
+    }
+    const isAllowed = prefixes.some(prefix => normalizedPath.startsWith(prefix));
+    if (!isAllowed) {
+        throw new Error(`${apiType} path '${normalizedPath}' is not allowed. Configure ${apiType === 'graph' ? 'GRAPH_ALLOWED_PREFIXES' : 'AZURE_ALLOWED_PREFIXES'}.`);
+    }
+}
+// Check USE_GRAPH_BETA environment variable (default secure: v1.0)
+const useGraphBeta = process.env.USE_GRAPH_BETA === 'true';
 const defaultGraphApiVersion = getDefaultGraphApiVersion();
 logger.info(`Graph API default version: ${defaultGraphApiVersion} (USE_GRAPH_BETA=${process.env.USE_GRAPH_BETA || 'undefined'})`);
 server.tool("Lokka-Microsoft", "A versatile tool to interact with Microsoft APIs including Microsoft Graph (Entra) and Azure Resource Management. IMPORTANT: For Graph API GET requests using advanced query parameters ($filter, $count, $search, $orderby), you are ADVISED to set 'consistencyLevel: \"eventual\"'.", {
@@ -34,6 +70,10 @@ server.tool("Lokka-Microsoft", "A versatile tool to interact with Microsoft APIs
     fetchAll: z.boolean().optional().default(false).describe("Set to true to automatically fetch all pages for list results (e.g., users, groups). Default is false."),
     consistencyLevel: z.string().optional().describe("Graph API ConsistencyLevel header. ADVISED to be set to 'eventual' for Graph GET requests using advanced query parameters ($filter, $count, $search, $orderby)."),
 }, async ({ apiType, path, method, apiVersion, subscriptionId, queryParams, body, graphApiVersion, fetchAll, consistencyLevel }) => {
+    if (!allowMutatingRequests && method !== 'get') {
+        throw new Error(`Method ${method.toUpperCase()} is blocked. Enable ALLOW_MUTATING_REQUESTS=true to allow.`);
+    }
+    assertPathAllowed(apiType, path);
     // Override graphApiVersion if USE_GRAPH_BETA is explicitly set to false
     const effectiveGraphApiVersion = !useGraphBeta ? "v1.0" : graphApiVersion;
     logger.info(`Executing Lokka-Microsoft tool with params: apiType=${apiType}, path=${path}, method=${method}, graphApiVersion=${effectiveGraphApiVersion}, fetchAll=${fetchAll}, consistencyLevel=${consistencyLevel}`);
@@ -484,6 +524,9 @@ async function main() {
     const useInteractive = process.env.USE_INTERACTIVE === 'true';
     const useClientToken = process.env.USE_CLIENT_TOKEN === 'true';
     const initialAccessToken = process.env.ACCESS_TOKEN;
+    if (secureMode && useClientToken) {
+        throw new Error("Client provided tokens are disabled in secure mode. Set SECURE_MODE=false to allow them explicitly.");
+    }
     let authMode;
     // Ensure only one authentication mode is enabled at a time
     const enabledModes = [
@@ -512,8 +555,11 @@ async function main() {
         if (hasClientCredentials) {
             authMode = AuthMode.ClientCredentials;
         }
+        else if (secureMode) {
+            throw new Error("Secure mode requires explicit authentication configuration (client credentials or certificate).");
+        }
         else {
-            // Default to interactive mode for better user experience
+            // Default to interactive mode for better user experience in non-secure scenarios
             authMode = AuthMode.Interactive;
             logger.info("No authentication mode specified and no client credentials found. Defaulting to interactive mode.");
         }
